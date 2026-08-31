@@ -36,7 +36,7 @@ fn scan_pattern(base: usize, size: usize, pattern: &[u8], mask: &str) -> Option<
     assert_eq!(
         pattern.len(),
         mask.len(),
-        "pattern and mask must have the same length"
+        "pattern and mask length must be equal"
     );
     if pattern.is_empty() {
         return None;
