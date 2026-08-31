@@ -1,0 +1,41 @@
+[package]
+name = "ssl-bypass"
+version = "0.1.0"
+edition = "2024"
+description = "Fortnite SSL bypass heavily based on Aurora.Runtime"
+
+[lib]
+name = "vaultnite_ssl_bypass"
+crate-type = ["cdylib"]
+
+[features]
+# local backend
+#   cargo build --release
+default = ["dev"]
+dev = []
+# live backend with proxy disabled
+#   cargo build --release --no-default-features --features prod
+prod = []
+
+[dependencies]
+regex = "1.13.1"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+[build-dependencies]
+time = { version = "0.3.55", default-features = false, features = ["std", "formatting"] }
+
+[profile.release]
+lto = true
+strip = true
