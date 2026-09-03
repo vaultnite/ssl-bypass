@@ -1,7 +1,5 @@
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::{LazyLock, OnceLock};
-
-use regex::bytes::{NoExpand, Regex as BytesRegex};
+use std::sync::OnceLock;
 
 use crate::build::HOST_URL;
 use crate::hook::Hook;
@@ -18,15 +16,38 @@ type CurlVsetopt = unsafe extern "system" fn(*mut c_void, c_int, *mut c_void) ->
 
 static CURL_VSETOPT: OnceLock<CurlVsetopt> = OnceLock::new();
 
-static EPIC_GAMES_URL: LazyLock<BytesRegex> =
-    LazyLock::new(|| BytesRegex::new(r"https://(.*)\.ol\.epicgames\.com").unwrap());
+static MATCH_HOSTS: &[&str] = &["ol.epicgames.com", "ol.epicgames.net", "epicgames.dev"];
 
-fn rewrite_url(url: &[u8]) -> Vec<u8> {
-    let mut out = EPIC_GAMES_URL
-        .replace_all(url, NoExpand(HOST_URL.as_bytes()))
-        .into_owned();
+fn is_matched_host(host: &str) -> bool {
+    MATCH_HOSTS
+        .iter()
+        .any(|candidate| host == *candidate || host.ends_with(&format!(".{candidate}")))
+}
+
+fn terminated(url: &[u8]) -> Vec<u8> {
+    let mut out = url.to_vec();
     out.push(0);
     out
+}
+
+fn rewrite_host(url: &[u8]) -> Vec<u8> {
+    let bare = url
+        .strip_prefix(b"https://")
+        .or_else(|| url.strip_prefix(b"http://"));
+
+    let Some(bare) = bare else {
+        return terminated(url);
+    };
+    let host_end = bare
+        .iter()
+        .position(|b| b"/:?#".contains(b))
+        .unwrap_or(bare.len());
+    let (host, tail) = bare.split_at(host_end);
+
+    match std::str::from_utf8(host) {
+        Ok(host) if is_matched_host(host) => [HOST_URL.as_bytes(), tail, &[0]].concat(),
+        _ => terminated(url),
+    }
 }
 
 pub struct Curl {
@@ -79,16 +100,16 @@ unsafe extern "system" fn curl_easy_setopt_detour(
     };
 
     match tag {
-        CURLOPT_SSL_VERIFYPEER => unsafe { call_vsetopt(real, ctx, tag, 0) }, // set to false
+        CURLOPT_SSL_VERIFYPEER => unsafe { call_vsetopt(real, ctx, tag, 0) }, // disable ssl pinning
 
         CURLOPT_URL => {
             let url = unsafe { CStr::from_ptr(arg as *const c_char) }.to_bytes();
-            let redirected = rewrite_url(url);
+            let redirected = rewrite_host(url);
             unsafe { call_vsetopt(real, ctx, tag, redirected.as_ptr() as usize) }
-        }
+        } // rewrite hosts from epic servers to ours
 
         #[cfg(feature = "prod")]
-        CURLOPT_PROXY => unsafe { call_vsetopt(real, ctx, tag, c"".as_ptr() as usize) },
+        CURLOPT_PROXY => unsafe { call_vsetopt(real, ctx, tag, c"".as_ptr() as usize) }, // disables system proxy respect; artifact from original aurora.runtime
 
         _ => unsafe { call_vsetopt(real, ctx, tag, arg) },
     }
@@ -101,11 +122,11 @@ unsafe fn call_vsetopt(real: CurlVsetopt, ctx: *mut c_void, tag: c_int, value: u
 
 #[cfg(test)]
 mod tests {
-    use super::{HOST_URL, rewrite_url};
+    use super::{HOST_URL, rewrite_host};
 
     #[test]
-    fn rewrite_url_redirects_epic_hosts_and_terminates() {
-        let out = rewrite_url(
+    fn rewrite_host_redirects_epic_host_and_terminates() {
+        let out = rewrite_host(
             b"https://fortnite-public-service-prod11.ol.epicgames.com/fortnite/api/calendar/v1/timeline?region=NA",
         );
         assert_eq!(
@@ -115,8 +136,28 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_url_passes_other_hosts_through_terminated() {
-        let out = rewrite_url(b"https://example.com/some/path");
+    fn rewrite_host_redirects_epic_dev_host_and_terminates() {
+        let out = rewrite_host(
+            b"https://fortnite-public-service-prod11.ol.epicgames.net/fortnite/api/calendar/v1/timeline?region=NA",
+        );
+        assert_eq!(
+            out,
+            format!("{HOST_URL}/fortnite/api/calendar/v1/timeline?region=NA\0").as_bytes()
+        );
+    }
+
+    #[test]
+    fn rewrite_host_redirects_eos_host_and_terminates() {
+        let out = rewrite_host(b"https://api.epicgames.dev/auth/v1/oauth/token?junk_key=TEST");
+        assert_eq!(
+            out,
+            format!("{HOST_URL}/auth/v1/oauth/token?junk_key=TEST\0").as_bytes()
+        );
+    }
+
+    #[test]
+    fn rewrite_host_passes_other_hosts_through_terminated() {
+        let out = rewrite_host(b"https://example.com/some/path");
         assert_eq!(out, b"https://example.com/some/path\0");
     }
 }
